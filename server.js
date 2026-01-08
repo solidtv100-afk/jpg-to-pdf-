@@ -5,36 +5,36 @@ import cors from '@fastify/cors';
 import sharp from 'sharp';
 import PDFDocument from 'pdfkit';
 
-/* ===============================
-   SERVER
-================================ */
+/* =====================================================
+   SERVER SETUP
+===================================================== */
 
 const fastify = Fastify({
   logger: false,
-  bodyLimit: 10 * 1024 * 1024
+  bodyLimit: 10 * 1024 * 1024 // 10 MB
 });
 
-/* ===============================
-   CORS (LOCKED)
-================================ */
+/* =====================================================
+   CORS — LOCKED TO FRONTEND
+===================================================== */
 
 await fastify.register(cors, {
   origin: 'https://solidtv100-afk.github.io',
   methods: ['POST']
 });
 
-/* ===============================
+/* =====================================================
    RATE LIMIT
-================================ */
+===================================================== */
 
 await fastify.register(rateLimit, {
   max: 1,
   timeWindow: '45 seconds'
 });
 
-/* ===============================
+/* =====================================================
    MULTIPART
-================================ */
+===================================================== */
 
 await fastify.register(multipart, {
   limits: {
@@ -43,16 +43,16 @@ await fastify.register(multipart, {
   }
 });
 
-/* ===============================
+/* =====================================================
    CONSTANTS
-================================ */
+===================================================== */
 
 const A4_WIDTH_PX = 2480;
 const A4_HEIGHT_PX = 3508;
 
-/* ===============================
-   ROUTE
-================================ */
+/* =====================================================
+   ROUTE — JPG → PDF
+===================================================== */
 
 fastify.post('/convert', async (req, reply) => {
   const file = await req.file();
@@ -62,37 +62,44 @@ fastify.post('/convert', async (req, reply) => {
     return;
   }
 
-  /* ---- Magic byte check ---- */
-  const firstChunk = await file.file.read(3);
-  if (!firstChunk || firstChunk[0] !== 0xff || firstChunk[1] !== 0xd8) {
+  /* ---------- MAGIC BYTE CHECK ---------- */
+  const header = await file.file.read(3);
+  if (!header || header[0] !== 0xff || header[1] !== 0xd8) {
     reply.code(400).send('Invalid JPEG');
     return;
   }
-  file.file.unshift(firstChunk);
+  file.file.unshift(header);
 
-  /* ---- Sharp processing ---- */
-  const image = sharp();
-  file.file.pipe(image);
+  let imageBuffer;
 
-  const metadata = await image.metadata();
-  if (metadata.space === 'cmyk') {
-    reply.code(400).send('CMYK not allowed');
+  try {
+    /* ---------- SINGLE SHARP PIPELINE (CRITICAL FIX) ---------- */
+    imageBuffer = await sharp(file.file)
+      .metadata()
+      .then(meta => {
+        if (meta.space === 'cmyk') {
+          throw new Error('CMYK not allowed');
+        }
+
+        return sharp(file.file)
+          .removeAlpha()
+          .withMetadata({ density: 300 })
+          .resize({
+            width: A4_WIDTH_PX,
+            height: A4_HEIGHT_PX,
+            fit: 'inside',
+            withoutEnlargement: true
+          })
+          .jpeg({ quality: 85 })
+          .toBuffer();
+      });
+
+  } catch (err) {
+    reply.code(400).send('Image processing failed');
     return;
   }
 
-  const buffer = await image
-    .removeAlpha()
-    .withMetadata({ density: 300 })
-    .resize({
-      width: A4_WIDTH_PX,
-      height: A4_HEIGHT_PX,
-      fit: 'inside',
-      withoutEnlargement: true
-    })
-    .jpeg({ quality: 85 })
-    .toBuffer();
-
-  /* ---- PDF streaming ---- */
+  /* ---------- PDF STREAM ---------- */
   const pdf = new PDFDocument({
     size: 'A4',
     margin: 0
@@ -106,7 +113,7 @@ fastify.post('/convert', async (req, reply) => {
 
   pdf.pipe(reply.raw);
 
-  pdf.image(buffer, 0, 0, {
+  pdf.image(imageBuffer, 0, 0, {
     fit: [595, 842],
     align: 'center',
     valign: 'center'
@@ -115,9 +122,9 @@ fastify.post('/convert', async (req, reply) => {
   pdf.end();
 });
 
-/* ===============================
-   START
-================================ */
+/* =====================================================
+   START SERVER
+===================================================== */
 
 fastify.listen({
   port: process.env.PORT || 3000,
