@@ -18,7 +18,7 @@ const fastify = Fastify({
    CORS (SAFE)
 ================================ */
 await fastify.register(cors, {
-  origin: true
+  origin: "https://solidtv100-afk.github.io"
 });
 
 /* ================================
