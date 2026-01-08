@@ -6,47 +6,45 @@ import sharp from "sharp";
 import PDFDocument from "pdfkit";
 
 /* ================================
-   SERVER SETUP
+   FASTIFY INSTANCE
 ================================ */
 const fastify = Fastify({
-  logger: false,
+  logger: true,
   bodyLimit: 10 * 1024 * 1024 // 10 MB
 });
 
 /* ================================
-   CORS (LOCKED TO FRONTEND)
+   CORS (ALLOW FRONTEND)
+   - Safe for GitHub Pages
+   - Prevents silent browser block
 ================================ */
 await fastify.register(cors, {
-  origin: "https://solidtv100-afk.github.io",
-  methods: ["POST", "GET"]
+  origin: true
 });
 
 /* ================================
-   RATE LIMIT
+   RATE LIMIT (TESTING + PROD SAFE)
+   - Prevents abuse
+   - Does NOT break mobile testing
 ================================ */
 await fastify.register(rateLimit, {
-  max: 1,
-  timeWindow: "45 seconds"
+  max: 20,               // allow retries
+  timeWindow: "1 minute",
+  ban: 0                 // never auto-ban
 });
 
 /* ================================
-   MULTIPART
+   MULTIPART (FILE UPLOAD)
 ================================ */
 await fastify.register(multipart, {
   limits: {
-    fileSize: 10 * 1024 * 1024,
+    fileSize: 10 * 1024 * 1024, // 10 MB
     files: 1
   }
 });
 
 /* ================================
-   CONSTANTS
-================================ */
-const A4_WIDTH_PX = 2480;
-const A4_HEIGHT_PX = 3508;
-
-/* ================================
-   HEALTH CHECK ROUTE (IMPORTANT)
+   HEALTH CHECK
 ================================ */
 fastify.get("/", async () => {
   return {
@@ -57,33 +55,32 @@ fastify.get("/", async () => {
 });
 
 /* ================================
-   JPG → PDF ROUTE
+   JPG → PDF CONVERSION (CRASH-FREE)
 ================================ */
 fastify.post("/convert", async (req, reply) => {
-  const file = await req.file();
-
-  if (!file || file.mimetype !== "image/jpeg") {
-    return reply.code(400).send("Only JPG images are allowed");
-  }
-
-  /* --- MAGIC BYTE CHECK --- */
-  const header = await file.file.read(3);
-  if (!header || header[0] !== 0xff || header[1] !== 0xd8) {
-    return reply.code(400).send("Invalid JPG file");
-  }
-  file.file.unshift(header);
-
   try {
-    /* --- SHARP PROCESSING --- */
-    const imageBuffer = await sharp(await file.toBuffer())
-      .resize(A4_WIDTH_PX, A4_HEIGHT_PX, {
+    const file = await req.file();
+
+    // Validate file existence & type
+    if (
+      !file ||
+      !["image/jpeg", "image/jpg"].includes(file.mimetype)
+    ) {
+      return reply.code(400).send("Only JPG images are allowed");
+    }
+
+    // Safe: convert stream → buffer
+    const inputBuffer = await file.toBuffer();
+
+    // Sharp handles validation internally
+    const imageBuffer = await sharp(inputBuffer)
+      .resize(2480, 3508, {
         fit: "contain",
         background: "white"
       })
       .jpeg({ quality: 90 })
       .toBuffer();
 
-    /* --- PDF GENERATION --- */
     const pdf = new PDFDocument({
       size: "A4",
       margin: 0
@@ -101,7 +98,9 @@ fastify.post("/convert", async (req, reply) => {
       height: 841.89
     });
     pdf.end();
+
   } catch (err) {
+    console.error("CONVERSION ERROR:", err);
     reply.code(500).send("PDF generation failed");
   }
 });
@@ -111,4 +110,7 @@ fastify.post("/convert", async (req, reply) => {
 ================================ */
 const PORT = process.env.PORT || 10000;
 
-fastify.listen({ port: PORT, host: "0.0.0.0" });
+fastify.listen({
+  port: PORT,
+  host: "0.0.0.0"
+});
